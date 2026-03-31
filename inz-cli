@@ -3,8 +3,15 @@
 import argparse
 import urllib.request
 import urllib.parse
+import urllib.error
 import json
 import sys
+
+def extract_items(res):
+    try:
+        return json.loads(res.get("results", "[]"))
+    except json.JSONDecodeError:
+        return []
 
 def search_employers(query, page=1):
     url = "https://www.immigration.govt.nz/list-api/getAPIResults/"
@@ -20,9 +27,23 @@ def search_employers(query, page=1):
     try:
         with urllib.request.urlopen(req) as response:
             return json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8', errors='replace') if hasattr(e, 'read') else ''
+        try:
+            payload = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            payload = {}
+        return {
+            "httpStatus": e.code,
+            "error": True,
+            "Title": payload.get("Title", ""),
+            "Message": payload.get("Message", f"HTTP {e.code}")
+        }
     except Exception as e:
-        print(f"Error fetching data: {e}", file=sys.stderr)
-        sys.exit(1)
+        return {
+            "error": True,
+            "Message": f"Network error: {e}"
+        }
 
 def print_table(items):
     cols = ["Employer Name", "Trading Name", "NZBN", "Expiry Date"]
@@ -59,30 +80,37 @@ def main():
     
     print(f"Searching INZ Accredited Employers for '{args.query}'...\n")
     res = search_employers(args.query, 1)
+
+    if res.get("error"):
+        message = (res.get("Message") or "").strip().replace("\n", " ")
+        lower = message.lower()
+        if "no results" in lower:
+            print("No accredited employers found.")
+            return
+        if "too many results" in lower:
+            print("Too many results. Please type more of the business name or use a full 13-digit NZBN.")
+            return
+        print(f"Query failed: {message}", file=sys.stderr)
+        sys.exit(1)
     
     total = res.get("totalResults", 0)
     total_pages = res.get("totalPages", 0)
+    items = extract_items(res)
     
-    if total == 0:
+    if total == 0 or not items:
         print("No accredited employers found.")
         return
         
     print(f"Found {total} results.\n")
-    
-    try:
-        items = json.loads(res.get("results", "[]"))
-    except json.JSONDecodeError:
-        items = []
         
     all_items = items
     
     if args.all and total_pages > 1:
         for p in range(2, total_pages + 1):
             res_page = search_employers(args.query, p)
-            try:
-                all_items.extend(json.loads(res_page.get("results", "[]")))
-            except json.JSONDecodeError:
-                pass
+            if res_page.get("error"):
+                break
+            all_items.extend(extract_items(res_page))
 
     if all_items:
         print_table(all_items)
